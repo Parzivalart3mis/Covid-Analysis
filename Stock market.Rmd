@@ -1,0 +1,205 @@
+---
+title: "TSMC stock price prediction"
+author: "Yash Vardhan Sharma"
+date: "11/29/2021"
+output: html_document
+---
+
+# Set up environment
+```{r}
+
+library("tidyverse")
+library("tidymodels")
+library("timetk")
+library("patchwork")
+library("lubridate")
+library("modeltime")
+```
+
+```{r}
+# Read the data set, convert the date and create new columns
+df_tsm <- 
+  read_csv("E:\\sem5\\cse3505\\Project\\TSM.csv")%>% 
+  rename("Adj.Close" = "Adj Close")%>%
+  mutate(date = ymd(Date),
+         trend = row_number(),
+         year = as.factor(year(Date)),
+         quarter = as.factor(quarter(Date)),
+         month = as.factor(month(Date))) %>% 
+  filter(date >= '2010-01-01')
+
+str(df_tsm)
+```
+
+# Data preparing
+```{r}
+# Check is any missing value in date and adj.close
+is.nan(df_tsm$Adj.Close)
+is.finite(df_tsm$Adj.Close)
+
+
+is.nan(df_tsm$date)
+is.finite(df_tsm$date)
+```
+
+* There is no missing value in Adj.Close and date.
+
+
+# EDA
+```{r}
+# Plot the TSMC stock price over time
+df_tsm %>% 
+  plot_time_series(date, Adj.Close, .smooth=FALSE, .plotly_slider = T)
+```
+
+* As we can see stock price of TSMC is not stationary and it growed dramatically since 2020.
+
+```{r}
+# Plot the TSMC stock price starting from last year
+
+df_tsm %>%
+  filter(date>='2020-01-01') %>% 
+  plot_time_series(date, Adj.Close, .smooth=FALSE)
+```
+
+```{r}
+# Create a plot of individual years
+
+df_tsm %>%
+  plot_time_series(month, scale(Adj.Close, center = TRUE, scale = TRUE), 
+                   .smooth= FALSE, 
+                   .color_var = lubridate::year(date), 
+                   .interactive = FALSE, 
+                   .color_lab = "Year", 
+                   .title='Seasonal plot for TSM stock price since 2010',
+                   .y_lab='Adj.Close', 
+                   .x_lab='Month')
+```
+
+* From this plot, we can also see since 2020, prices are outliners.
+
+```{r}
+# Create a STL decomposition plot for the full data
+
+df_tsm %>%
+  plot_stl_diagnostics(
+    date, Adj.Close,
+    # Set features to return, desired frequency and trend
+    .feature_set = c("observed", "season", "trend"), 
+    .interactive = FALSE)
+```
+
+* From this STL decomposable plot, we can see a clear growth trend. 
+
+```{r}
+# Create a STL decomposition plot for a subset of the data since 2020
+
+df_tsm %>%
+  filter(date>='2020-01-01') %>%
+  plot_stl_diagnostics(
+    date, Adj.Close,
+    # Set features to return, desired frequency and trend
+    .feature_set = c("observed", "season", "trend"), 
+    .interactive = FALSE)
+```
+
+* If we get a closer look, it seems like TSMC stock price show "week" patterns in season subplot.
+
+
+```{r}
+df_decompose_table <- 
+  df_tsm %>%
+  tk_stl_diagnostics(date, Adj.Close, .frequency = "auto", .trend = "auto")
+
+df_decompose_table
+```
+
+```{r}
+plot_seasadj <-
+  df_decompose_table %>%
+  ggplot(aes(x = date)) +
+  geom_line(aes(y = observed, color = "Adj.Close"), size = 1.3) +
+  geom_line(aes(y = seasadj, color = "Seasonal Adjusted Price")) +
+  xlab("Years") + ylab("Price") +
+  ggtitle("TSMC stock price over time") +
+  scale_x_date(date_breaks = "years" , date_labels = "%y") +
+  theme(axis.text.x = element_text(angle = 45))
+
+plot_seasadj
+```
+
+* I try to use STL method to decompose Adj.Close and plot with original stock price. They are almost matched. 
+
+
+
+# Data Analyzing
+```{r}
+# Build an ARIMA model
+
+arima_auto <- 
+  arima_reg() %>% 
+  set_engine("auto_arima") %>%
+  fit(Adj.Close ~ date, data = df_tsm)
+
+arima_auto
+
+```
+
+
+```{r}
+# Split the data
+
+df_train <- df_tsm %>% filter(date < '2020-01-01')
+df_test <- df_tsm %>% filter(date >= '2020-01-01')
+```
+
+```{r}
+# Auto ARIMA: gird search q, d, p
+auto_arima <- 
+  arima_reg(seasonal_period = "auto") %>%
+  set_engine(engine = "auto_arima") %>%
+  fit(Adj.Close ~ date, data = df_train)
+
+auto_arima
+
+# Auto ARIMA adding other variable
+auto_arima_volume <- 
+  arima_reg(seasonal_period = "auto") %>%
+  set_engine(engine = "auto_arima") %>%
+  fit(Adj.Close ~ date + Volume, data = df_train)
+
+auto_arima_volume
+```
+
+* Both AIC and BIC are smaller in the second model. With this standard, ARIMA model adding volume is a better model in this case.
+
+```{r}
+# Model table
+
+models_tbl <- modeltime_table(
+  auto_arima,
+  auto_arima_volume
+)
+
+calibration_tbl <- models_tbl %>%
+    modeltime_calibrate(new_data = df_test)
+
+calibration_tbl %>%
+  modeltime_accuracy()%>%
+  table_modeltime_accuracy(.interactive = FALSE)
+```
+
+* From the matrix table, we can also see the second model has smaller mae and rmse. With this standard, ARIMA model adding volume is a better model in this case.
+
+```{r}
+calibration_tbl %>%
+    modeltime_forecast(
+        new_data    = df_test,
+        actual_data = df_tsm
+    ) %>%
+    plot_modeltime_forecast(
+      .legend_max_width = 10,
+      .interactive      = FALSE
+    )
+```
+* Because we know from above analytics that since 2020 TSMC stock prices were growing too fast, and we can  consider them as outliners. So in our prediction, the second model predicts TSMC stock price should go up but not as fast as reality did.
